@@ -224,19 +224,34 @@ class CommentCopier:
         # Для альбомов в комментариях:
         current_gid: Optional[int] = None
         album: List = []
+        try:
+            async for c in self.client.iter_messages(src_entity, reply_to=src_post_id, limit=self.limit, reverse=True):
+                scanned += 1
+                gid = getattr(c, "grouped_id", None)
 
-        async for c in self.client.iter_messages(src_entity, reply_to=src_post_id, limit=self.limit, reverse=True):
-            scanned += 1
-            gid = getattr(c, "grouped_id", None)
+                if gid is not None:
+                    if current_gid is None:
+                        current_gid = gid
+                        album = [c]
+                    elif gid == current_gid:
+                        album.append(c)
+                    else:
+                        # закрываем предыдущий альбом
+                        sender = None
+                        try:
+                            sender = await album[0].get_sender()
+                        except Exception:
+                            pass
+                        ctx = f"{base_ctx} album_gid={current_gid}"
+                        await self._copy_album(dest_entity, dest_post_id, album, sender, ctx=ctx)
+                        copied += 1
 
-            if gid is not None:
-                if current_gid is None:
-                    current_gid = gid
-                    album = [c]
-                elif gid == current_gid:
-                    album.append(c)
-                else:
-                    # закрываем предыдущий альбом
+                        current_gid = gid
+                        album = [c]
+                    continue
+
+                # если перед одиночным был альбом — закрыть
+                if current_gid is not None and album:
                     sender = None
                     try:
                         sender = await album[0].get_sender()
@@ -245,12 +260,14 @@ class CommentCopier:
                     ctx = f"{base_ctx} album_gid={current_gid}"
                     await self._copy_album(dest_entity, dest_post_id, album, sender, ctx=ctx)
                     copied += 1
+                    current_gid = None
+                    album = []
 
-                    current_gid = gid
-                    album = [c]
-                continue
+                # одиночный комментарий
+                await self._copy_one_comment(src_entity, dest_entity, c=c, dest_post_id=dest_post_id)
+                copied += 1
 
-            # если перед одиночным был альбом — закрыть
+            # финальный альбом
             if current_gid is not None and album:
                 sender = None
                 try:
@@ -260,22 +277,8 @@ class CommentCopier:
                 ctx = f"{base_ctx} album_gid={current_gid}"
                 await self._copy_album(dest_entity, dest_post_id, album, sender, ctx=ctx)
                 copied += 1
-                current_gid = None
-                album = []
 
-            # одиночный комментарий
-            await self._copy_one_comment(src_entity, dest_entity, c=c, dest_post_id=dest_post_id)
-            copied += 1
+            log.info("done comments | %s | scanned=%s copied=%s", base_ctx, scanned, copied)
 
-        # финальный альбом
-        if current_gid is not None and album:
-            sender = None
-            try:
-                sender = await album[0].get_sender()
-            except Exception:
-                pass
-            ctx = f"{base_ctx} album_gid={current_gid}"
-            await self._copy_album(dest_entity, dest_post_id, album, sender, ctx=ctx)
-            copied += 1
-
-        log.info("done comments | %s | scanned=%s copied=%s", base_ctx, scanned, copied)
+        except Exception as ex:
+            log.warning(f"something wrong: {ex}")
